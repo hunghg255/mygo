@@ -974,7 +974,16 @@ build` like mygo-runtime and released with the same version.
     on macOS, `TIOCGPTN` on Linux), the program in a session of its own
     with the slave as its controlling terminal; ConPTY on Windows
     (`CreatePseudoConsole`, a process attribute list), whose console the
-    terminal closes once the program exits. The user's shell starts as a
+    terminal closes once the program exits. Windows apps ship the
+    ConPTY of the Windows Terminal team's NuGet package, `conpty.dll` and
+    its console host `OpenConsole.exe` (`internal/conpty`, whose
+    `mygo-plugin.json` names them, imported by `internal/pty` on Windows
+    only, so that other apps don't ship them): Windows 10's own renders
+    the screen again rather than pass the output through, which drops the
+    mouse and alternate-screen modes of full-screen programs, splits their
+    synchronized updates and skips frames. The terminal falls back to
+    Windows' own when the app's does not load or make a console, and
+    `MYGO_CONPTY=inbox` keeps to it. The user's shell starts as a
     login shell (`-zsh`), when the first frame of a view sizes the screen
     (or after half a second without one), so that it starts at its size.
     A key the view takes tells Windows' backend to open no menu for the

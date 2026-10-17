@@ -1,6 +1,6 @@
-// Package library finds libghostty-vt for the terminal plugin: next to
-// the app, in the user's cache, or downloaded there, as mygo-plugin.json
-// names it.
+// Package library finds the native libraries of the terminal plugin,
+// libghostty-vt and, on Windows, ConPTY's: next to the app, in the user's
+// cache, or downloaded there, as a mygo-plugin.json names them.
 package library
 
 import (
@@ -31,20 +31,20 @@ type nativeFile struct {
 	SHA256 string `json:"sha256"`
 }
 
-// library returns the build of libghostty-vt for this platform that the
-// manifest names.
-func library(manifest []byte) (nativeFile, error) {
+// library returns the build of the library named name for this platform
+// that the manifest names.
+func library(manifest []byte, name string) (nativeFile, error) {
 	var n nativeLibraries
 	if err := json.Unmarshal(manifest, &n); err != nil {
 		return nativeFile{}, err
 	}
 	target := runtime.GOOS + "-" + runtime.GOARCH
 	for _, l := range n.Libraries {
-		if f, ok := l.Files[target]; ok && l.Name == "libghostty-vt" {
+		if f, ok := l.Files[target]; ok && l.Name == name {
 			return f, nil
 		}
 	}
-	return nativeFile{}, fmt.Errorf("terminal: libghostty-vt has no build for %s", target)
+	return nativeFile{}, fmt.Errorf("terminal: %s has no build for %s", name, target)
 }
 
 // Find returns the libghostty-vt that manifest names for this platform,
@@ -61,10 +61,17 @@ func library(manifest []byte) (nativeFile, error) {
 //
 // Packaged apps never download it: build them with the CLI.
 func Find(manifest []byte) (string, error) {
-	if p := os.Getenv("MYGO_GHOSTTY_VT"); p != "" {
+	return FindNamed(manifest, "libghostty-vt", "MYGO_GHOSTTY_VT")
+}
+
+// FindNamed returns the library named name that manifest names for this
+// platform, looking where Find looks for libghostty-vt, the file the
+// variable env names first.
+func FindNamed(manifest []byte, name, env string) (string, error) {
+	if p := os.Getenv(env); p != "" {
 		return p, nil
 	}
-	f, err := library(manifest)
+	f, err := library(manifest, name)
 	if err != nil {
 		return "", err
 	}

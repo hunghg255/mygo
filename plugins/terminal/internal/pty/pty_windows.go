@@ -3,19 +3,19 @@ package pty
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
 	"syscall"
 	"unicode/utf16"
 	"unsafe"
+
+	"github.com/egoist/mygo/plugins/terminal/internal/conpty"
 )
 
 var (
 	kernel32                              = syscall.NewLazyDLL("kernel32.dll") // a KnownDLL
-	procCreatePseudoConsole               = kernel32.NewProc("CreatePseudoConsole")
-	procResizePseudoConsole               = kernel32.NewProc("ResizePseudoConsole")
-	procClosePseudoConsole                = kernel32.NewProc("ClosePseudoConsole")
 	procInitializeProcThreadAttributeList = kernel32.NewProc("InitializeProcThreadAttributeList")
 	procUpdateProcThreadAttribute         = kernel32.NewProc("UpdateProcThreadAttribute")
 	procDeleteProcThreadAttributeList     = kernel32.NewProc("DeleteProcThreadAttributeList")
@@ -34,46 +34,122 @@ type startupInfoEx struct {
 
 type sys struct {
 	mu      sync.Mutex
-	console uintptr // the HPCON, 0 once closed
+	api     *conptyAPI // the ConPTY that made the console
+	console uintptr    // the HPCON, 0 once closed
 	in      *os.File
 	out     *os.File
 	process syscall.Handle
 	pid     int
 }
 
+// conptyAPI is a ConPTY's functions: Windows' own, in kernel32.dll, or
+// those of the conpty.dll an app ships, which runs the console in its
+// OpenConsole.exe.
+type conptyAPI struct {
+	name                  string // what errors call it
+	create, resize, close *syscall.LazyProc
+}
+
+// inbox is Windows' own ConPTY. Windows 10's renders the screen again
+// rather than pass the output through: full-screen programs lose their
+// mouse, alternate screen and synchronized updates.
+var inbox = &conptyAPI{name: "Windows' ConPTY",
+	create: kernel32.NewProc("CreatePseudoConsole"),
+	resize: kernel32.NewProc("ResizePseudoConsole"),
+	close:  kernel32.NewProc("ClosePseudoConsole")}
+
+var shipped struct {
+	once sync.Once
+	api  *conptyAPI
+}
+
+// shippedAPI returns the ConPTY the app ships (package conpty), nil when
+// it has none or it does not load, which it logs once. MYGO_CONPTY=inbox
+// keeps to Windows' own.
+func shippedAPI() *conptyAPI {
+	shipped.once.Do(func() {
+		api, err := loadShipped()
+		if err != nil {
+			log.Printf("terminal: %v; using Windows' own ConPTY", err)
+			return
+		}
+		shipped.api = api
+	})
+	return shipped.api
+}
+
+// loadShipped loads the ConPTY the app ships.
+func loadShipped() (*conptyAPI, error) {
+	if v := os.Getenv("MYGO_CONPTY"); v == "inbox" {
+		return nil, errors.New("MYGO_CONPTY=inbox")
+	}
+	path, err := conpty.Path()
+	if err != nil {
+		return nil, err
+	}
+	dll := syscall.NewLazyDLL(path)
+	api := &conptyAPI{name: "conpty.dll",
+		create: dll.NewProc("ConptyCreatePseudoConsole"),
+		resize: dll.NewProc("ConptyResizePseudoConsole"),
+		close:  dll.NewProc("ConptyClosePseudoConsole")}
+	for _, p := range []*syscall.LazyProc{api.create, api.resize, api.close} {
+		if err := p.Find(); err != nil {
+			return nil, fmt.Errorf("loading %s: %w", path, err)
+		}
+	}
+	return api, nil
+}
+
 func (p *PTY) start(o Options) error {
-	if err := procCreatePseudoConsole.Find(); err != nil {
+	// The ConPTY the app ships, and Windows' own when it fails, as when
+	// a security product stops OpenConsole.exe.
+	if api := shippedAPI(); api != nil {
+		created, err := p.startWith(api, o)
+		if created || err == nil {
+			return err // the program's own failure, as a missing one
+		}
+		log.Printf("terminal: %v; using Windows' own ConPTY", err)
+	}
+	if err := inbox.create.Find(); err != nil {
 		return errors.New("pty: ConPTY needs Windows 10 1809 or later")
 	}
+	_, err := p.startWith(inbox, o)
+	return err
+}
+
+// startWith starts the process in a console that api makes, and reports
+// whether it made the console.
+func (p *PTY) startWith(api *conptyAPI, o Options) (created bool, err error) {
 	// The console reads what is typed from inR and writes the output to
 	// outW; this side writes to inW and reads outR.
 	var inR, inW, outR, outW syscall.Handle
 	if err := syscall.CreatePipe(&inR, &inW, nil, 0); err != nil {
-		return fmt.Errorf("pty: %w", err)
+		return false, fmt.Errorf("pty: %w", err)
 	}
 	if err := syscall.CreatePipe(&outR, &outW, nil, 0); err != nil {
 		syscall.CloseHandle(inR)
 		syscall.CloseHandle(inW)
-		return fmt.Errorf("pty: %w", err)
+		return false, fmt.Errorf("pty: %w", err)
 	}
 	var console uintptr
-	r, _, _ := procCreatePseudoConsole.Call(coord(o.Cols, o.Rows), uintptr(inR), uintptr(outW), 0, uintptr(unsafe.Pointer(&console)))
+	r, _, _ := api.create.Call(coord(o.Cols, o.Rows), uintptr(inR), uintptr(outW), 0, uintptr(unsafe.Pointer(&console)))
 	// The console has its own copies of its ends.
 	syscall.CloseHandle(inR)
 	syscall.CloseHandle(outW)
 	if r != 0 {
 		syscall.CloseHandle(inW)
 		syscall.CloseHandle(outR)
-		return fmt.Errorf("pty: CreatePseudoConsole: %w", syscall.Errno(r&0xFFFF))
+		return false, fmt.Errorf("pty: CreatePseudoConsole of %s: %w", api.name, syscall.Errno(r&0xFFFF))
 	}
-	p.console = console
+	p.api, p.console = api, console
 	p.in, p.out = os.NewFile(uintptr(inW), "conpty-in"), os.NewFile(uintptr(outR), "conpty-out")
 	if err := p.spawn(o); err != nil {
 		p.Close()
 		p.out.Close()
-		return err
+		p.api, p.console, p.in, p.out = nil, 0, nil, nil
+		return true, err
 	}
-	return nil
+	return true, nil
 }
 
 func (p *PTY) spawn(o Options) error {
@@ -149,7 +225,7 @@ func (p *PTY) Resize(cols, rows, width, height int) error {
 	if p.console == 0 {
 		return ErrClosed
 	}
-	if r, _, _ := procResizePseudoConsole.Call(p.console, coord(cols, rows)); r != 0 {
+	if r, _, _ := p.api.resize.Call(p.console, coord(cols, rows)); r != 0 {
 		return fmt.Errorf("pty: ResizePseudoConsole: %w", syscall.Errno(r&0xFFFF))
 	}
 	return nil
@@ -172,9 +248,10 @@ func (p *PTY) Close() error {
 	// ClosePseudoConsole waits for the output to be read on Windows
 	// before 11 24H2: Read keeps reading meanwhile, until the end of the
 	// output, then the pipe goes.
+	api, out := p.api, p.out
 	go func() {
-		procClosePseudoConsole.Call(console)
-		p.out.Close()
+		api.close.Call(console)
+		out.Close()
 	}()
 	return nil
 }
