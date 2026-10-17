@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -11,8 +12,25 @@ var urlPattern = regexp.MustCompile(`(?:https?|ftp|file)://[^\s"'<>` + "`" + `\x
 
 // pathPattern finds the file paths programs print as text: absolute, from
 // ~, ./ or ../, with a slash, or a file name with a :line; each may end in
-// :line or :line:col.
-var pathPattern = regexp.MustCompile(`(?:(?:~|\.{1,2})?/[^\s"'<>` + "`" + `\x00-\x1f:]+|[\w.@+-]+(?:/[\w.@+-]+)+/?)(?::\d+(?::\d+)?)?|[\w@+-][\w.@+-]*\.\w+:\d+(?::\d+)?`)
+// :line or :line:col. On Windows, those with a drive (C:\dir\file,
+// C:/dir/file) or with backslashes (dir\file, .\file) too.
+var pathPattern = pathPatternFor(runtime.GOOS == "windows")
+
+// pathPatternFor returns pathPattern, with Windows' paths when windows is
+// set.
+func pathPatternFor(windows bool) *regexp.Regexp {
+	const name = `[^\s"'<>` + "`" + `\x00-\x1f:]+`
+	const line = `(?::\d+(?::\d+)?)?`
+	const unix = `(?:(?:~|\.{1,2})?/` + name + `|[\w.@+-]+(?:/[\w.@+-]+)+/?)` + line + `|[\w@+-][\w.@+-]*\.\w+:\d+(?::\d+)?`
+	if !windows {
+		return regexp.MustCompile(unix)
+	}
+	// A drive's path first, which the others would take from its first
+	// separator; then backslashes, from .\ or ..\ or with a folder.
+	const drive = `[A-Za-z]:[\\/]` + name + line
+	const backslash = `(?:(?:~|\.{1,2})\\` + name + `|[\w.@+-]+(?:\\[\w.@+-]+)+\\?)` + line
+	return regexp.MustCompile(drive + `|` + backslash + `|` + unix)
+}
 
 // urlAt returns the URL of text, a row whose runes are in columns cols, at
 // column col, or "".

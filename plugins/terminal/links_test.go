@@ -48,3 +48,41 @@ func TestPathAt(t *testing.T) {
 		}
 	}
 }
+
+func TestPathAtWindows(t *testing.T) {
+	windows, unix := pathPatternFor(true), pathPatternFor(false)
+	for _, c := range []struct {
+		row  string
+		col  int
+		want string
+	}{
+		{`  ⎿  Read D:\projects\mycode\main.go (12 lines)`, 20, `D:\projects\mycode\main.go`},
+		{`C:\src\app\main.go:250:3: undefined: x`, 5, `C:\src\app\main.go:250:3`},
+		{`see C:/Users/me/notes.txt.`, 8, `C:/Users/me/notes.txt`},
+		{`Updated cmd\mayoi\panel.go:51 and more`, 10, `cmd\mayoi\panel.go:51`},
+		{`run .\build\app.exe`, 6, `.\build\app.exe`},
+		{`go to ..\other\x.go`, 8, `..\other\x.go`},
+		{`PS D:\projects\mycode> git status`, 8, `D:\projects\mycode`},
+		{`Updated internal/app/embed.go:51 and more`, 10, `internal/app/embed.go:51`},
+		{`main.go:250:3: undefined: x`, 2, `main.go:250:3`},
+		{`just words here`, 5, ``},
+	} {
+		text := []rune(c.row)
+		cols := make([]int, len(text))
+		for i := range cols {
+			cols[i] = i
+		}
+		if got := matchAt(windows, text, cols, c.col); got != c.want {
+			t.Errorf("windows: pathAt(%q, %d) = %q, want %q", c.row, c.col, got, c.want)
+		}
+	}
+	// Elsewhere a backslash is no separator.
+	text := []rune(`cmd\mayoi\panel.go`)
+	cols := make([]int, len(text))
+	for i := range cols {
+		cols[i] = i
+	}
+	if got := matchAt(unix, text, cols, 5); got != "" {
+		t.Errorf("unix: took %q", got)
+	}
+}
