@@ -177,6 +177,9 @@ type AppHandler interface {
 type AppController interface {
 	SetActivationPolicy(policy string)
 	Activate()
+	// AllowForeground lets the next process to ask bring its windows to
+	// the front, which Windows only lets the process in front do.
+	AllowForeground()
 	Hide()
 	Unhide()
 	IsHidden() bool
@@ -352,10 +355,18 @@ type WindowOptions struct {
 	UserScripts []UserScript
 	// Schemes lists the custom protocols the webview must route to
 	// WindowHandler.SchemeRequest.
-	Schemes   []string
-	DevTools  bool
+	Schemes  []string
+	DevTools bool
+	// UserAgent overrides the user agent of the webview.
 	UserAgent string
-	Zoom      float64
+	// UserAgentSuffix is appended to UserAgent, or to the webview's own
+	// user agent, after a space. The public package trims it.
+	UserAgentSuffix string
+	Zoom            float64
+	// TabFocusesLinks makes Tab reach links and form controls that are not
+	// text fields (macOS, WKPreferences.tabFocusesLinks); the other
+	// platforms reach them already.
+	TabFocusesLinks bool
 	// Native carries backend specific state, e.g. the WKWebViewConfiguration
 	// WebKit hands us for window.open().
 	Native uintptr
@@ -954,12 +965,17 @@ type Secrets interface {
 type TrayHandler interface {
 	Clicked()
 	RightClicked()
+	// AppearanceChanged tells that the bar the icon shows on turned dark
+	// or light.
+	AppearanceChanged()
 }
 
 // Tray is a status bar / notification area icon.
 type Tray interface {
 	// SetID names the icon across launches (macOS's autosave name).
 	SetID(id string)
+	// Dark reports whether the bar the icon shows on is dark.
+	Dark() bool
 	SetImage(png []byte, template bool) error
 	SetTitle(title string)
 	SetToolTip(tip string)
